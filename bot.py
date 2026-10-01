@@ -22,7 +22,7 @@ from telegram.ext import (
 )
 
 
-SERPAPI_URL = "https://serpapi.com/search.json"
+SERPER_SHOPPING_URL = "https://google.serper.dev/shopping"
 CHECK_INTERVAL_SECONDS = 12 * 60 * 60
 SEARCH_RESULT_TTL_SECONDS = 30 * 60
 STORES = {
@@ -35,7 +35,7 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "pricebot.sqlite3")
 logger = logging.getLogger("pricebot")
 
 
-class SerpApiError(Exception):
+class SerperError(Exception):
     pass
 
 
@@ -165,7 +165,7 @@ def format_price(price_cents: int) -> str:
 def shopping_candidates(data: dict[str, Any]) -> list[dict[str, Any]]:
     candidates = []
     seen = set()
-    results = data.get("shopping_results", [])
+    results = data.get("shopping_results", data.get("shopping", []))
     if not isinstance(results, list):
         return candidates
     for result in results:
@@ -173,7 +173,11 @@ def shopping_candidates(data: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         store = matching_store(str(result.get("source", "")))
         link = result.get("product_link") or result.get("link")
-        product_id = result.get("product_id") or result.get("offer_id")
+        product_id = (
+            result.get("product_id")
+            or result.get("productId")
+            or result.get("offer_id")
+        )
         title = result.get("title")
         price_cents = price_to_cents(
             result.get("extracted_price")
@@ -193,15 +197,16 @@ def shopping_candidates(data: dict[str, Any]) -> list[dict[str, Any]]:
         if key in seen:
             continue
         seen.add(key)
-        candidates.append(
-            {
-                "store": store,
-                "product_id": str(product_id),
-                "title": str(title),
-                "link": str(link),
-                "price_cents": price_cents,
-            }
-        )
+        candidate = {
+            "store": store,
+            "product_id": str(product_id),
+            "title": str(title),
+            "link": str(link),
+            "price_cents": price_cents,
+        }
+        if store == "Amazon.es":
+            candidate["seller_label"] = "Amazon"
+        candidates.append(candidate)
     return candidates[:10]
 
 
@@ -231,21 +236,51 @@ def seller_offer(
     return None
 
 
-async def serpapi_search(
+def amazon_offers(data: dict[str, Any]) -> list[tuple[int, str, str]]:
+    seller_results = data.get("sellers_results") or {}
+    if not isinstance(seller_results, dict):
+        return []
+    sellers = seller_results.get("online_sellers") or []
+    if not isinstance(sellers, list):
+        return []
+
+    offers = []
+    for seller in sellers:
+        if not isinstance(seller, dict):
+            continue
+        price_cents = None
+        for field in ("extracted_price", "base_price", "total_price", "price"):
+            price_cents = price_to_cents(seller.get(field))
+            if price_cents is not None:
+                break
+        if price_cents is None:
+            continue
+        seller_name = str(seller.get("name") or "").strip()
+        link = str(seller.get("link") or seller.get("direct_link") or "")
+        label = "Amazon" if is_amazon_direct_seller(seller_name) else "Marketplace"
+        offers.append((price_cents, link, label))
+    return offers
+
+
+async def serper_search(
     client: httpx.AsyncClient, api_key: str, params: dict[str, str]
 ) -> dict[str, Any]:
-    response = await client.get(
-        SERPAPI_URL, params={**params, "api_key": api_key}, timeout=30
+    payload = {key: value for key, value in params.items() if key != "engine"}
+    response = await client.post(
+        SERPER_SHOPPING_URL,
+        headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+        json=payload,
+        timeout=30,
     )
     response.raise_for_status()
     try:
         data = response.json()
     except ValueError as error:
-        raise SerpApiError("SerpApi devolvió una respuesta que no es JSON.") from error
+        raise SerperError("Serper devolvió una respuesta que no es JSON.") from error
     if not isinstance(data, dict):
-        raise SerpApiError("SerpApi devolvió una respuesta inesperada.")
-    if data.get("error"):
-        raise SerpApiError(str(data["error"]))
+        raise SerperError("Serper devolvió una respuesta inesperada.")
+    if data.get("message") and data.get("error"):
+        raise SerperError(str(data["message"]))
     return data
 
 
@@ -262,7 +297,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.effective_message.reply_text(
         "Comandos disponibles:\n"
         "/buscar <producto> — busca opciones en las tiendas compatibles "
-        "(en Amazon, solo vendedor Amazon).\n"
+        "(incluye resultados de Amazon Shopping).\n"
         "/seguimiento — muestra los productos que estás vigilando.\n"
         "/quitar <id> — deja de vigilar un producto (el ID aparece en /seguimiento).\n\n"
         "Los precios se comprueban cada 12 horas. Solo recibirás avisos si cambian."
@@ -275,7 +310,7 @@ async def search_products(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.effective_message.reply_text("Uso: /buscar nombre del producto")
         return
 
-    api_key = os.environ["SERPAPI_API_KEY"]
+    api_key = os.environ["SERPER_API_KEY"]
     await update.effective_message.reply_text(f"Buscando «{query}»…")
     try:
         async with httpx.AsyncClient() as client:
@@ -288,7 +323,7 @@ async def search_products(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "location": "Madrid,Community of Madrid,Spain",
                 "num": "100",
             }
-            data = await serpapi_search(client, api_key, search_params)
+            data = await serper_search(client, api_key, search_params)
             candidates = shopping_candidates(data)
 
             # Google Shopping may omit a store from the first page. Search
@@ -307,7 +342,7 @@ async def search_products(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 if store in found_stores:
                     continue
                 try:
-                    store_data = await serpapi_search(
+                    store_data = await serper_search(
                         client,
                         api_key,
                         {
@@ -315,7 +350,7 @@ async def search_products(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                             "q": f"{query} {store}",
                         },
                     )
-                except (httpx.HTTPError, SerpApiError):
+                except (httpx.HTTPError, SerperError):
                     logger.info("Store-specific search failed for %s", store)
                     continue
                 for candidate in shopping_candidates(store_data):
@@ -325,47 +360,17 @@ async def search_products(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         candidate_keys.add(key)
                         found_stores.add(candidate["store"])
 
-            amazon_candidates = [
-                candidate
-                for candidate in candidates
-                if candidate["store"] == "Amazon.es"
-            ]
-            for candidate in amazon_candidates:
-                try:
-                    product_data = await serpapi_search(
-                        client,
-                        api_key,
-                        {
-                            "engine": "google_product",
-                            "product_id": candidate["product_id"],
-                            "gl": "es",
-                            "hl": "es",
-                        },
-                    )
-                except (httpx.HTTPError, SerpApiError):
-                    candidates.remove(candidate)
-                    continue
-                amazon_offer = seller_offer(
-                    product_data, "Amazon.es", amazon_direct_only=True
-                )
-                if amazon_offer is None:
-                    candidates.remove(candidate)
-                    continue
-                candidate["price_cents"], offer_link = amazon_offer
-                if offer_link:
-                    candidate["link"] = offer_link
-    except (httpx.HTTPError, SerpApiError) as error:
+    except (httpx.HTTPError, SerperError) as error:
         logger.warning("Product search failed (%s)", type(error).__name__)
         await update.effective_message.reply_text(
             "No se pudo completar la búsqueda. Comprueba la clave y el estado "
-            "de SerpApi e inténtalo de nuevo."
+            "de Serper e inténtalo de nuevo."
         )
         return
 
     if not candidates:
         await update.effective_message.reply_text(
-            "No encontré resultados válidos. En Amazon solo muestro artículos "
-            "vendidos y enviados por Amazon. Prueba con otro nombre."
+            "No encontré resultados válidos. Prueba con otro nombre."
         )
         return
 
@@ -395,7 +400,14 @@ async def search_products(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     int(time.time()) + SEARCH_RESULT_TTL_SECONDS,
                 ),
             )
-            label = f"Seguir {candidate['store']}: {format_price(candidate['price_cents'])}"
+            seller_label = candidate.get("seller_label")
+            seller_suffix = (
+                f" (Vendido por {seller_label})" if seller_label else ""
+            )
+            label = (
+                f"Seguir {candidate['store']}{seller_suffix}: "
+                f"{format_price(candidate['price_cents'])}"
+            )
             keyboard.append(
                 [
                     InlineKeyboardButton(
@@ -518,31 +530,37 @@ async def check_tracked_product(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     try:
-        data = await serpapi_search(
+        data = await serper_search(
             client,
             api_key,
             {
-                "engine": "google_product",
-                "product_id": product["product_id"],
+                "engine": "google_shopping",
+                "q": product["title"],
+                "google_domain": "google.es",
                 "gl": "es",
                 "hl": "es",
             },
         )
-    except (httpx.HTTPError, SerpApiError) as error:
+    except (httpx.HTTPError, SerperError) as error:
         logger.warning(
             "Price check failed for tracked product %s (%s)",
             product["id"],
             type(error).__name__,
         )
         await remember_error(
-            product["id"], "falló la consulta a SerpApi", product["chat_id"], context
+            product["id"], "falló la consulta a Serper", product["chat_id"], context
         )
         return
 
-    offer = seller_offer(
-        data,
-        product["store"],
-        amazon_direct_only=product["store"] == "Amazon.es",
+    matches = [
+        candidate
+        for candidate in shopping_candidates(data)
+        if candidate["store"] == product["store"]
+    ]
+    offer = (
+        (matches[0]["price_cents"], matches[0]["link"])
+        if matches
+        else None
     )
     if offer is None:
         await remember_error(
@@ -583,7 +601,7 @@ async def check_tracked_product(
 
 
 async def poll_prices(context: ContextTypes.DEFAULT_TYPE) -> None:
-    api_key = os.environ["SERPAPI_API_KEY"]
+    api_key = os.environ["SERPER_API_KEY"]
     with database() as connection:
         products = connection.execute(
             "SELECT * FROM tracked_products ORDER BY id"
@@ -617,7 +635,7 @@ async def handle_application_error(
     )
     for secret in (
         os.getenv("TELEGRAM_BOT_TOKEN", ""),
-        os.getenv("SERPAPI_API_KEY", ""),
+        os.getenv("SERPER_API_KEY", ""),
     ):
         if secret:
             details = details.replace(secret, "[REDACTED]")
@@ -626,11 +644,11 @@ async def handle_application_error(
 
 def main() -> None:
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    serpapi_key = os.environ.get("SERPAPI_API_KEY")
+    serper_api_key = os.environ.get("SERPER_API_KEY")
     if not telegram_token:
         raise RuntimeError("Falta configurar TELEGRAM_BOT_TOKEN.")
-    if not serpapi_key:
-        raise RuntimeError("Falta configurar SERPAPI_API_KEY.")
+    if not serper_api_key:
+        raise RuntimeError("Falta configurar SERPER_API_KEY.")
 
     initialize_database()
     logging.basicConfig(
