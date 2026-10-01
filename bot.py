@@ -27,6 +27,7 @@ STORES = {
     "Amazon.es": ("amazon.es", "amazon"),
     "PcComponentes": ("pccomponentes",),
     "MediaMarkt": ("mediamarkt",),
+    "FNAC": ("fnac.es", "fnac"),
 }
 DATABASE_PATH = os.getenv("DATABASE_PATH", "pricebot.sqlite3")
 logger = logging.getLogger("pricebot")
@@ -193,7 +194,7 @@ async def serpapi_search(
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "Hola. Puedo buscar precios en Amazon.es, PcComponentes y MediaMarkt "
+        "Hola. Puedo buscar precios en Amazon.es, PcComponentes, MediaMarkt y FNAC "
         "y avisarte cuando cambien.\n\n"
         "Usa /buscar nombre del producto para empezar, /seguimiento para ver "
         "tus productos o /ayuda para ver los comandos."

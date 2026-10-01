@@ -1,7 +1,7 @@
 # Bot de seguimiento de precios para Telegram
 
-Busca productos en Amazon.es, PcComponentes y MediaMarkt mediante Google Shopping
-(a través de SerpApi). Elige el resultado exacto que quieres vigilar; el bot
+Busca productos en Amazon.es, PcComponentes, MediaMarkt y FNAC mediante Google
+Shopping (a través de SerpApi). Elige el resultado exacto que quieres vigilar; el bot
 comprueba su oferta cada 12 horas y avisa solo cuando detecta un cambio de precio.
 Los seguimientos se guardan en SQLite y sobreviven a los reinicios.
 
