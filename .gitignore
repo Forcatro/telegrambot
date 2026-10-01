@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.py[cod]
+pricebot.sqlite3
+pricebot.sqlite3-shm
+pricebot.sqlite3-wal
