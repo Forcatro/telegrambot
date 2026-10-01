@@ -127,7 +127,11 @@ def matching_store(source: str) -> str | None:
 
 def is_amazon_direct_seller(source: str) -> bool:
     normalized = normalize_text(source).strip()
-    return normalized in {"amazon", "amazon.es"} or normalized.startswith("amazon eu ")
+    return (
+        normalized == "amazon"
+        or normalized.startswith("amazon.")
+        or normalized.startswith("amazon eu ")
+    )
 
 
 def price_to_cents(value: Any) -> int | None:
@@ -275,19 +279,52 @@ async def search_products(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.effective_message.reply_text(f"Buscando «{query}»…")
     try:
         async with httpx.AsyncClient() as client:
-            data = await serpapi_search(
-                client,
-                api_key,
-                {
-                    "engine": "google_shopping",
-                    "q": query,
-                    "google_domain": "google.es",
-                    "gl": "es",
-                    "hl": "es",
-                    "location": "Madrid,Community of Madrid,Spain",
-                },
-            )
+            search_params = {
+                "engine": "google_shopping",
+                "q": query,
+                "google_domain": "google.es",
+                "gl": "es",
+                "hl": "es",
+                "location": "Madrid,Community of Madrid,Spain",
+                "num": "100",
+            }
+            data = await serpapi_search(client, api_key, search_params)
             candidates = shopping_candidates(data)
+
+            # Google Shopping may omit a store from the first page. Search
+            # specifically for stores that were not returned.
+            # Amazon gets a dedicated query as well: generic Shopping results
+            # often contain only third-party marketplace offers.
+            found_stores = {
+                candidate["store"]
+                for candidate in candidates
+                if candidate["store"] != "Amazon.es"
+            }
+            candidate_keys = {
+                (candidate["store"], candidate["product_id"]) for candidate in candidates
+            }
+            for store in STORES:
+                if store in found_stores:
+                    continue
+                try:
+                    store_data = await serpapi_search(
+                        client,
+                        api_key,
+                        {
+                            **search_params,
+                            "q": f"{query} {store}",
+                        },
+                    )
+                except (httpx.HTTPError, SerpApiError):
+                    logger.info("Store-specific search failed for %s", store)
+                    continue
+                for candidate in shopping_candidates(store_data):
+                    key = (candidate["store"], candidate["product_id"])
+                    if key not in candidate_keys:
+                        candidates.append(candidate)
+                        candidate_keys.add(key)
+                        found_stores.add(candidate["store"])
+
             amazon_candidates = [
                 candidate
                 for candidate in candidates
