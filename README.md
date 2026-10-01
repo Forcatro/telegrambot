@@ -55,3 +55,7 @@ ruta, configura `DATABASE_PATH`.
 
 El bot debe permanecer ejecutándose para realizar las revisiones. Ejecuta las
 pruebas unitarias con `py -m unittest discover -s tests`.
+
+Si aparece un error inesperado, el manejador del bot registra el traceback
+completo en la consola para facilitar el diagnóstico. Los tokens configurados
+se ocultan en ese registro; comparte el traceback sin publicar credenciales.

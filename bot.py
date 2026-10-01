@@ -3,6 +3,7 @@ import os
 import re
 import sqlite3
 import time
+import traceback
 import unicodedata
 import uuid
 from contextlib import contextmanager
@@ -477,6 +478,26 @@ async def post_init(application: Application) -> None:
     )
 
 
+async def handle_application_error(
+    update: object, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    error = context.error
+    if error is None:
+        logger.error("Telegram application reported an error without exception details.")
+        return
+
+    details = "".join(
+        traceback.format_exception(type(error), error, error.__traceback__)
+    )
+    for secret in (
+        os.getenv("TELEGRAM_BOT_TOKEN", ""),
+        os.getenv("SERPAPI_API_KEY", ""),
+    ):
+        if secret:
+            details = details.replace(secret, "[REDACTED]")
+    logger.error("Unhandled exception in Telegram application:\n%s", details)
+
+
 def main() -> None:
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     serpapi_key = os.environ.get("SERPAPI_API_KEY")
@@ -502,6 +523,7 @@ def main() -> None:
     application.add_handler(CommandHandler("seguimiento", list_tracking))
     application.add_handler(CommandHandler("quitar", remove_tracking))
     application.add_handler(CallbackQueryHandler(track_result, pattern=r"^track:"))
+    application.add_error_handler(handle_application_error)
     application.run_polling()
 
 
