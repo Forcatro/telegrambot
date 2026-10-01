@@ -132,10 +132,21 @@ def shopping_candidates(data: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(result, dict):
             continue
         store = matching_store(str(result.get("source", "")))
-        product_id = result.get("product_id")
+        link = result.get("product_link") or result.get("link")
+        product_id = result.get("product_id") or result.get("offer_id")
         title = result.get("title")
-        link = result.get("product_link")
-        price_cents = price_to_cents(result.get("extracted_price"))
+        price_cents = price_to_cents(
+            result.get("extracted_price")
+            or result.get("price")
+            or result.get("raw_price")
+        )
+
+        # Some merchants, including MediaMarkt, do not expose a product ID
+        # in every Google Shopping response. The canonical link is still
+        # stable enough to identify the result for tracking.
+        if not product_id and link:
+            product_id = link
+
         if not store or not product_id or not title or not link or price_cents is None:
             continue
         key = (store, str(product_id))
