@@ -2,12 +2,14 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import time
 import traceback
 import unicodedata
 import uuid
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import httpx
@@ -35,6 +37,35 @@ logger = logging.getLogger("pricebot")
 
 class SerpApiError(Exception):
     pass
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path not in ("/", "/health"):
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = b"ok\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+
+def start_health_server() -> None:
+    port = os.getenv("PORT")
+    if not port:
+        return
+    try:
+        server = ThreadingHTTPServer(("0.0.0.0", int(port)), HealthHandler)
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"No se pudo abrir el puerto PORT={port}.") from error
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logger.info("Health server listening on port %s", port)
 
 
 @contextmanager
@@ -536,6 +567,7 @@ def main() -> None:
     application.add_handler(CommandHandler("quitar", remove_tracking))
     application.add_handler(CallbackQueryHandler(track_result, pattern=r"^track:"))
     application.add_error_handler(handle_application_error)
+    start_health_server()
     application.run_polling()
 
 

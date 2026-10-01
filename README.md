@@ -56,6 +56,12 @@ ruta, configura `DATABASE_PATH`.
 El bot debe permanecer ejecutándose para realizar las revisiones. Ejecuta las
 pruebas unitarias con `py -m unittest discover -s tests`.
 
+### Render
+
+Si se despliega como **Web Service**, usa `python bot.py` como comando de
+inicio. El bot escucha automáticamente el puerto `PORT` que asigna Render y
+responde `ok` en `/health`, mientras mantiene el polling de Telegram.
+
 Si aparece un error inesperado, el manejador del bot registra el traceback
 completo en la consola para facilitar el diagnóstico. Los tokens configurados
 se ocultan en ese registro; comparte el traceback sin publicar credenciales.
