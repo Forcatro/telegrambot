@@ -125,6 +125,11 @@ def matching_store(source: str) -> str | None:
     return None
 
 
+def is_amazon_direct_seller(source: str) -> bool:
+    normalized = normalize_text(source).strip()
+    return normalized in {"amazon", "amazon.es"} or normalized.startswith("amazon eu ")
+
+
 def price_to_cents(value: Any) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
@@ -196,7 +201,9 @@ def shopping_candidates(data: dict[str, Any]) -> list[dict[str, Any]]:
     return candidates[:10]
 
 
-def seller_offer(data: dict[str, Any], store: str) -> tuple[int, str] | None:
+def seller_offer(
+    data: dict[str, Any], store: str, amazon_direct_only: bool = False
+) -> tuple[int, str] | None:
     seller_results = data.get("sellers_results") or {}
     if not isinstance(seller_results, dict):
         return None
@@ -206,7 +213,11 @@ def seller_offer(data: dict[str, Any], store: str) -> tuple[int, str] | None:
     for seller in sellers:
         if not isinstance(seller, dict):
             continue
-        if matching_store(str(seller.get("name", ""))) != store:
+        seller_name = str(seller.get("name", ""))
+        if amazon_direct_only:
+            if store != "Amazon.es" or not is_amazon_direct_seller(seller_name):
+                continue
+        elif matching_store(seller_name) != store:
             continue
         for field in ("extracted_price", "base_price", "total_price", "price"):
             price_cents = price_to_cents(seller.get(field))
@@ -246,7 +257,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "Comandos disponibles:\n"
-        "/buscar <producto> — busca opciones en las tiendas compatibles.\n"
+        "/buscar <producto> — busca opciones en las tiendas compatibles "
+        "(en Amazon, solo vendedor Amazon).\n"
         "/seguimiento — muestra los productos que estás vigilando.\n"
         "/quitar <id> — deja de vigilar un producto (el ID aparece en /seguimiento).\n\n"
         "Los precios se comprueban cada 12 horas. Solo recibirás avisos si cambian."
@@ -275,6 +287,36 @@ async def search_products(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "location": "Madrid,Community of Madrid,Spain",
                 },
             )
+            candidates = shopping_candidates(data)
+            amazon_candidates = [
+                candidate
+                for candidate in candidates
+                if candidate["store"] == "Amazon.es"
+            ]
+            for candidate in amazon_candidates:
+                try:
+                    product_data = await serpapi_search(
+                        client,
+                        api_key,
+                        {
+                            "engine": "google_product",
+                            "product_id": candidate["product_id"],
+                            "gl": "es",
+                            "hl": "es",
+                        },
+                    )
+                except (httpx.HTTPError, SerpApiError):
+                    candidates.remove(candidate)
+                    continue
+                amazon_offer = seller_offer(
+                    product_data, "Amazon.es", amazon_direct_only=True
+                )
+                if amazon_offer is None:
+                    candidates.remove(candidate)
+                    continue
+                candidate["price_cents"], offer_link = amazon_offer
+                if offer_link:
+                    candidate["link"] = offer_link
     except (httpx.HTTPError, SerpApiError) as error:
         logger.warning("Product search failed (%s)", type(error).__name__)
         await update.effective_message.reply_text(
@@ -283,10 +325,10 @@ async def search_products(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    candidates = shopping_candidates(data)
     if not candidates:
         await update.effective_message.reply_text(
-            "No encontré resultados con precio en esas tiendas. Prueba con otro nombre."
+            "No encontré resultados válidos. En Amazon solo muestro artículos "
+            "vendidos y enviados por Amazon. Prueba con otro nombre."
         )
         return
 
@@ -460,7 +502,11 @@ async def check_tracked_product(
         )
         return
 
-    offer = seller_offer(data, product["store"])
+    offer = seller_offer(
+        data,
+        product["store"],
+        amazon_direct_only=product["store"] == "Amazon.es",
+    )
     if offer is None:
         await remember_error(
             product["id"],
